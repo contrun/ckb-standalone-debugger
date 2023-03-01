@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::with_name("mode")
                 .long("mode")
                 .help("Execution mode of debugger")
-                .possible_values(&["full", "fast", "gdb"])
+                .possible_values(&["full", "fast", "gdb", "probe"])
                 .default_value(&default_mode)
                 .required(true)
                 .takes_value(true),
@@ -392,6 +392,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         return Ok(());
+    }
+
+    if matches_mode == "probe" {
+        #[cfg(not(feature = "probe"))]
+        {
+            println!("To use probe mode, feature probes must be enabled!");
+            return Ok(());
+        }
+
+        #[cfg(feature = "probe")]
+        {
+            use ckb_vm::{instructions::execute, registers, Register};
+            use probe::probe;
+
+            let mut machine = machine_init();
+            let bytes = machine.load_program(&verifier_program, &verifier_args_byte)?;
+            let transferred_cycles = transferred_byte_cycles(bytes);
+            machine.add_cycles(transferred_cycles)?;
+
+            machine.set_running(true);
+            let mut decoder =
+                build_decoder::<u64>(verifier_script_version.vm_isa(), verifier_script_version.vm_version());
+
+            let mut step_result = Ok(());
+            while machine.running() && step_result.is_ok() {
+                let pc = machine.pc().to_u64();
+                step_result = decoder
+                    .decode(machine.memory_mut(), pc)
+                    .and_then(|inst| {
+                        let cycles = machine.instruction_cycle_func()(inst);
+                        machine.add_cycles(cycles).map(|_| inst)
+                    })
+                    .and_then(|inst| {
+                        let ra = machine.registers()[registers::RA];
+                        let sp = machine.registers()[registers::SP];
+                        let s0 = machine.registers()[registers::S0];
+                        let s1 = machine.registers()[registers::S1];
+                        let a0 = machine.registers()[registers::A0];
+                        let a1 = machine.registers()[registers::A1];
+                        let a2 = machine.registers()[registers::A2];
+                        let a3 = machine.registers()[registers::A3];
+                        let a4 = machine.registers()[registers::A4];
+                        let a5 = machine.registers()[registers::A5];
+                        probe!(ckb_vm, execute_inst, pc, ra, sp, s0, s1, a0, a1, a2, a3, a4, a5, inst);
+                        let gp = machine.registers()[registers::GP];
+                        let tp = machine.registers()[registers::TP];
+                        let t0 = machine.registers()[registers::T0];
+                        let t1 = machine.registers()[registers::T1];
+                        let t2 = machine.registers()[registers::T2];
+                        let t3 = machine.registers()[registers::T3];
+                        let t4 = machine.registers()[registers::T4];
+                        let t5 = machine.registers()[registers::T5];
+                        let t6 = machine.registers()[registers::T6];
+                        let a6 = machine.registers()[registers::A6];
+                        let a7 = machine.registers()[registers::A7];
+                        probe!(ckb_vm, execute_inst2, pc, gp, tp, t0, t1, t2, t3, t4, t5, t6, a6, a7);
+                        let s2 = machine.registers()[registers::S2];
+                        let s3 = machine.registers()[registers::S3];
+                        let s4 = machine.registers()[registers::S4];
+                        let s5 = machine.registers()[registers::S5];
+                        let s6 = machine.registers()[registers::S6];
+                        let s7 = machine.registers()[registers::S7];
+                        let s8 = machine.registers()[registers::S8];
+                        let s9 = machine.registers()[registers::S9];
+                        let s10 = machine.registers()[registers::S10];
+                        let s11 = machine.registers()[registers::S11];
+                        probe!(ckb_vm, execute_inst3, pc, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11);
+                        execute(inst, &mut machine)
+                    });
+            }
+            let result = step_result.map(|_| machine.exit_code());
+
+            println!("Run result: {:?}", result);
+            println!("Total cycles consumed: {}", HumanReadableCycles(machine.cycles()));
+            println!(
+                "Transfer cycles: {}, running cycles: {}",
+                HumanReadableCycles(transferred_cycles),
+                HumanReadableCycles(machine.cycles() - transferred_cycles)
+            );
+        }
     }
 
     Ok(())
