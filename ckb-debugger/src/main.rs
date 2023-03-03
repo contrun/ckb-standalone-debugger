@@ -428,7 +428,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let regs = machine.registers().as_ptr();
                         let memory = (&mut machine.memory_mut().inner_mut()).as_ptr();
                         probe!(ckb_vm, execute_inst, pc, inst, regs, memory);
-                        execute(inst, &mut machine)
+                        let r = execute(inst, &mut machine);
+                        probe!(
+                            ckb_vm,
+                            execute_inst_end,
+                            pc,
+                            inst,
+                            regs,
+                            memory,
+                            if r.is_ok() { 0 } else { 1 }
+                        );
+                        r
                     });
             }
             let result = step_result.map(|_| machine.exit_code());
