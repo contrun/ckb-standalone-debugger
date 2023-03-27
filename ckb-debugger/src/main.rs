@@ -272,6 +272,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .syscall(Box::new(Stdio::new(false)));
         #[cfg(not(feature = "stdio"))]
         let mut machine_builder = DefaultMachineBuilder::new(machine_core).instruction_cycle_func(&instruction_cycles);
+        #[cfg(feature = "probes")]
+        {
+            machine_builder = machine_builder.syscall(Box::new(misc::Probe::new()));
+        }
         if let Some(data) = matches_dump_file {
             machine_builder = machine_builder.syscall(Box::new(ElfDumper::new(data.to_string(), 4097, 64)));
         }

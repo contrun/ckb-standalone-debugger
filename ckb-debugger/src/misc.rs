@@ -283,3 +283,30 @@ impl<Mac: SupportMachine> Syscalls<Mac> for FileOperation {
         Ok(true)
     }
 }
+
+#[cfg(feature = "probes")]
+pub struct Probe {}
+
+#[cfg(feature = "probes")]
+impl Probe {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+#[cfg(feature = "probes")]
+impl<Mac: SupportMachine> Syscalls<Mac> for Probe {
+    fn initialize(&mut self, _machine: &mut Mac) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn ecall(&mut self, machine: &mut Mac) -> Result<bool, Error> {
+        let id = machine.registers()[A7].to_u64();
+        let arg0 = machine.registers()[A0].to_u64();
+        let arg1 = machine.registers()[A1].to_u64();
+        let arg2 = machine.registers()[A2].to_u64();
+        let arg3 = machine.registers()[A3].to_u64();
+        probe::probe!(ckb_vm, syscall, id, arg0, arg1, arg2, arg3);
+        return Ok(false);
+    }
+}
