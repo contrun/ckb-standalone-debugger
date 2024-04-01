@@ -15,20 +15,23 @@ use ckb_types::prelude::Entity;
 use ckb_vm::cost_model::estimate_cycles;
 use ckb_vm::decoder::build_decoder;
 use ckb_vm::error::Error;
-use ckb_vm::instructions::extract_opcode;
 use ckb_vm::instructions::insts::OP_ECALL;
+use ckb_vm::instructions::tagged::TaggedInstruction;
+use ckb_vm::instructions::{extract_opcode, instruction_opcode_name};
 use ckb_vm::memory::flat::FlatMemory;
 use ckb_vm::registers::A7;
 use ckb_vm::{
-    Bytes, CoreMachine, DefaultCoreMachine, DefaultMachine, DefaultMachineBuilder, Register, SupportMachine,
-    WXorXMemory,
+    Bytes, CoreMachine, DefaultCoreMachine, DefaultMachine, DefaultMachineBuilder, Instruction, Register,
+    SupportMachine, WXorXMemory,
 };
 use ckb_vm_debug_utils::ElfDumper;
 #[cfg(feature = "stdio")]
 use ckb_vm_debug_utils::Stdio;
 use ckb_vm_pprof::{PProfMachine, Profile};
 use clap::{crate_version, App, Arg};
+use serde::{Deserialize, Serialize};
 use serde_json::from_str as from_json_str;
+use serde_json::to_writer;
 use serde_plain::from_str as from_plain_str;
 use std::fs::{read, read_to_string};
 use std::net::TcpListener;
@@ -95,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::with_name("mode")
                 .long("mode")
                 .help("Execution mode of debugger")
-                .possible_values(&["full", "fast", "gdb", "probe", "gdb_gdbstub"])
+                .possible_values(&["full", "fast", "gdb", "probe", "gdb_gdbstub", "trace_dump"])
                 .default_value(&default_mode)
                 .required(true)
                 .takes_value(true),
@@ -156,6 +159,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("trace-file")
+                .long("trace-file")
+                .help("Filename to which the executation trace dump will be saved to")
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("read-file")
                 .long("read-file")
                 .help("Read content from local file or stdin. Then feed the content to syscall in scripts")
@@ -199,6 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches_skip_start = matches.value_of("skip-start");
     let matches_step = matches.occurrences_of("step");
     let matches_tx_file = matches.value_of("tx-file");
+    let matches_trace_file = matches.value_of("trace-file");
     let matches_args = matches.values_of("args").unwrap_or_default();
     let matches_read_file_name = matches.value_of("read-file");
 
@@ -510,6 +520,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if matches_mode == "trace_dump" {
+        use ckb_vm::instructions::execute;
+
+        let writer = matches_trace_file.map(|f| std::fs::File::create(f).expect("open trace file"));
+        let mut traces = vec![];
+
+        #[derive(Debug, Clone)]
+        pub struct ExecutionTrace {
+            pub opcode: String,
+            pub ckb_vm_instruction: TaggedInstruction,
+            pub mnemonics: String,
+            pub op_a: u32,
+            pub op_b: u32,
+            pub op_c: u32,
+            pub imm_b: bool,
+            pub imm_c: bool,
+        }
+
+        let mut machine = machine_init();
+        let bytes = machine.load_program(&verifier_program, &verifier_args_byte)?;
+        let transferred_cycles = transferred_byte_cycles(bytes);
+        machine.add_cycles(transferred_cycles)?;
+        let mut global_clock: u64 = 0;
+
+        machine.set_running(true);
+        // Hardcode script version to v0 so that we don't use the new instruction set.
+        // because we want to start with less instructions.
+        let verifier_script_version = ScriptVersion::V0;
+        let mut decoder = build_decoder::<u64>(verifier_script_version.vm_isa(), verifier_script_version.vm_version());
+
+        let mut step_result = Ok(());
+        while machine.running() && step_result.is_ok() {
+            let pc = machine.pc().to_u64();
+            step_result = decoder
+                .decode(machine.memory_mut(), pc)
+                .and_then(|inst| {
+                    let cycles = machine.instruction_cycle_func()(inst);
+                    machine.add_cycles(cycles).map(|_| inst)
+                })
+                .and_then(|inst| {
+                    let regs = machine.registers().iter().map(|r| r.to_u64()).collect::<Vec<_>>();
+                    let tagged_inst = TaggedInstruction::try_from(inst).expect("valid tagged instruction");
+                    let cycles = machine.cycles();
+                    let trace = TraceItem::new(global_clock, pc, regs, TracedInstruction::new(tagged_inst));
+                    dbg!(global_clock, pc, cycles, &trace);
+                    if writer.is_some() {
+                        traces.push(trace);
+                    }
+                    let r = execute(inst, &mut machine);
+                    global_clock = global_clock + 1;
+                    r
+                });
+        }
+        let result = step_result.map(|_| machine.exit_code());
+
+        println!("Run result: {:?}", result);
+        println!("Total cycles consumed: {}", HumanReadableCycles(machine.cycles()));
+        println!(
+            "Transfer cycles: {}, running cycles: {}",
+            HumanReadableCycles(transferred_cycles),
+            HumanReadableCycles(machine.cycles() - transferred_cycles)
+        );
+
+        if let Some(mut writer) = writer {
+            to_writer(&mut writer, &traces).expect("write trace file");
+        }
+    }
+
     if matches_mode == "probe" {
         #[cfg(not(feature = "probes"))]
         {
@@ -634,4 +712,96 @@ fn machine_sget(
         }
     }
     return Ok(machine);
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TracedInstruction {
+    pub opcode: String,
+    pub instruction: Instruction,
+    pub mnemonics: String,
+    pub op_a: u32,
+    pub op_b: u32,
+    pub op_c: u32,
+    pub imm_b: bool,
+    pub imm_c: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceItem {
+    global_clock: u64,
+    program_counter: u64,
+    previous_register_state: Vec<u64>,
+    instruction: TracedInstruction,
+}
+
+impl TraceItem {
+    fn new(
+        global_clock: u64,
+        program_counter: u64,
+        previous_register_state: Vec<u64>,
+        instruction: TracedInstruction,
+    ) -> Self {
+        TraceItem {
+            global_clock,
+            program_counter,
+            previous_register_state,
+            instruction,
+        }
+    }
+}
+
+impl TracedInstruction {
+    fn new(inst: TaggedInstruction) -> Self {
+        let opcode = instruction_opcode_name(extract_opcode(inst.clone().into())).to_string();
+        let instruction = inst.clone().into();
+        let mnemonics = format!("{}", inst.clone());
+        match inst {
+            TaggedInstruction::Itype(i) => TracedInstruction {
+                opcode,
+                instruction,
+                mnemonics,
+                op_a: i.rd() as u32,
+                op_b: i.rs1() as u32,
+                op_c: i.immediate_u(),
+                imm_b: false,
+                imm_c: true,
+            },
+            TaggedInstruction::Rtype(r) => TracedInstruction {
+                opcode,
+                instruction,
+                mnemonics,
+                op_a: r.rd() as u32,
+                op_b: r.rs1() as u32,
+                op_c: r.rs2() as u32,
+                imm_b: false,
+                imm_c: false,
+            },
+            TaggedInstruction::Stype(s) => TracedInstruction {
+                opcode,
+                instruction,
+                mnemonics,
+                op_a: s.rs2() as u32,
+                op_b: s.rs1() as u32,
+                op_c: s.immediate_u() as u32,
+                imm_b: false,
+                imm_c: false,
+            },
+            TaggedInstruction::Utype(u) => TracedInstruction {
+                opcode,
+                instruction,
+                mnemonics,
+                op_a: u.rd() as u32,
+                op_b: u.immediate_u() as u32,
+                op_c: 0,
+                imm_b: false,
+                imm_c: false,
+            },
+            TaggedInstruction::R4type(r4) => {
+                panic!("Shouldn't have r4 type in trace dumping: {:?}", r4);
+            }
+            TaggedInstruction::R5type(r5) => {
+                panic!("Shouldn't have r5 type in trace dumping: {:?}", r5);
+            }
+        }
+    }
 }
