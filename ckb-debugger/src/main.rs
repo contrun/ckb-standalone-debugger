@@ -15,6 +15,7 @@ use ckb_types::prelude::Entity;
 use ckb_vm::cost_model::estimate_cycles;
 use ckb_vm::decoder::build_decoder;
 use ckb_vm::error::Error;
+use ckb_vm::instructions::instruction_length;
 use ckb_vm::instructions::insts::OP_ECALL;
 use ckb_vm::instructions::tagged::TaggedInstruction;
 use ckb_vm::instructions::{extract_opcode, instruction_opcode_name};
@@ -718,6 +719,7 @@ fn machine_sget(
 pub struct TracedInstruction {
     pub opcode: String,
     pub instruction: Instruction,
+    pub length: u32,
     pub mnemonics: String,
     pub op_a: u32,
     pub op_b: u32,
@@ -755,10 +757,12 @@ impl TracedInstruction {
             .to_string();
         let instruction = inst.clone().into();
         let mnemonics = format!("{}", inst.clone());
+        let length = instruction_length(instruction).into();
         match inst {
             TaggedInstruction::Itype(i) => TracedInstruction {
                 opcode,
                 instruction,
+                length,
                 mnemonics,
                 op_a: i.rd() as u32,
                 op_b: i.rs1() as u32,
@@ -769,6 +773,7 @@ impl TracedInstruction {
             TaggedInstruction::Rtype(r) => TracedInstruction {
                 opcode,
                 instruction,
+                length,
                 mnemonics,
                 op_a: r.rd() as u32,
                 op_b: r.rs1() as u32,
@@ -779,6 +784,7 @@ impl TracedInstruction {
             TaggedInstruction::Stype(s) => TracedInstruction {
                 opcode,
                 instruction,
+                length,
                 mnemonics,
                 op_a: s.rs2() as u32,
                 op_b: s.rs1() as u32,
@@ -789,6 +795,7 @@ impl TracedInstruction {
             TaggedInstruction::Utype(u) => TracedInstruction {
                 opcode,
                 instruction,
+                length,
                 mnemonics,
                 op_a: u.rd() as u32,
                 op_b: u.immediate_u() as u32,
