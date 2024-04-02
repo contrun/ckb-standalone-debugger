@@ -542,7 +542,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = machine.load_program(&verifier_program, &verifier_args_byte)?;
         let transferred_cycles = transferred_byte_cycles(bytes);
         machine.add_cycles(transferred_cycles)?;
-        let mut global_clock: u64 = 0;
+        let mut global_clk: u64 = 0;
 
         machine.set_running(true);
         // Hardcode script version to v0 so that we don't use the new instruction set.
@@ -563,13 +563,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let regs = machine.registers().iter().map(|r| r.to_u64()).collect::<Vec<_>>();
                     let tagged_inst = TaggedInstruction::try_from(inst).expect("valid tagged instruction");
                     let cycles = machine.cycles();
-                    let trace = TraceItem::new(global_clock, pc, regs, TracedInstruction::new(tagged_inst));
-                    dbg!(global_clock, pc, cycles, &trace);
+                    let trace = TraceItem::new(global_clk, pc, regs, TracedInstruction::new(tagged_inst));
+                    dbg!(global_clk, pc, cycles, &trace);
                     if writer.is_some() {
                         traces.push(trace);
                     }
                     let r = execute(inst, &mut machine);
-                    global_clock = global_clock + 1;
+                    global_clk = global_clk + 1;
                     r
                 });
         }
@@ -728,23 +728,18 @@ pub struct TracedInstruction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceItem {
-    global_clock: u64,
-    program_counter: u64,
-    previous_register_state: Vec<u64>,
+    global_clk: u64,
+    pc: u64,
+    registers: Vec<u64>,
     instruction: TracedInstruction,
 }
 
 impl TraceItem {
-    fn new(
-        global_clock: u64,
-        program_counter: u64,
-        previous_register_state: Vec<u64>,
-        instruction: TracedInstruction,
-    ) -> Self {
+    fn new(global_clk: u64, pc: u64, registers: Vec<u64>, instruction: TracedInstruction) -> Self {
         TraceItem {
-            global_clock,
-            program_counter,
-            previous_register_state,
+            global_clk,
+            pc,
+            registers,
             instruction,
         }
     }
@@ -752,7 +747,12 @@ impl TraceItem {
 
 impl TracedInstruction {
     fn new(inst: TaggedInstruction) -> Self {
-        let opcode = instruction_opcode_name(extract_opcode(inst.clone().into())).to_string();
+        let opcode = instruction_opcode_name(extract_opcode(inst.clone().into()))
+            // remove _VERSION0 or _VERSION1
+            .split("_")
+            .next()
+            .unwrap()
+            .to_string();
         let instruction = inst.clone().into();
         let mnemonics = format!("{}", inst.clone());
         match inst {
