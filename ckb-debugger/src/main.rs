@@ -793,7 +793,7 @@ impl TracedInstruction {
                 op_a: u.rd() as u32,
                 op_b: u.immediate_u() as u32,
                 op_c: 0,
-                imm_b: false,
+                imm_b: true,
                 imm_c: false,
             },
             TaggedInstruction::R4type(r4) => {
